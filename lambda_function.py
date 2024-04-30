@@ -2,7 +2,7 @@ import requests
 from html.parser import HTMLParser
 import os
 import json
-
+import boto3
 
 class HNHTMLParser(HTMLParser):
     def __init__(self):
@@ -39,10 +39,13 @@ class HNHTMLParser(HTMLParser):
                 self.articles.append((score, self.current_link))
 
 
+s3_client = boto3.client('s3')
+
 def lambda_handler(event, context):
-    article_cache_path = 'tmp/article_cache.json' if os.getenv('ENV') == "DEV" else '/tmp/article_cache.json'
-    response = requests.get("https://news.ycombinator.com/", timeout=10)
-    html = response.text
+    file_key = 'article-cache.json'
+    bucket_name = 'discord-lambda-cache'
+    resp = requests.get("https://news.ycombinator.com/", timeout=10)
+    html = resp.text
 
     if not html:
         raise ValueError("could not request hacker news")
@@ -53,43 +56,41 @@ def lambda_handler(event, context):
 
     articles_sorted = sorted(parser.articles, key=lambda x: x[0], reverse=True)
 
-    if not os.path.isfile(article_cache_path):
-        with open(article_cache_path, 'w', encoding='utf-8') as file:
-            file.write('[]')
+    used_articles = []
+    try:
+        response = s3_client.get_object(Bucket=bucket_name, Key=file_key)
+        used_articles = json.load(response['Body'])
+    except Exception as e:
+        print(e)
 
+    top_article = None
 
-    with open(article_cache_path, 'r', encoding='utf-8') as file:
-        used_articles = json.loads(file.read())
+    for article in articles_sorted:
+        if article[1] not in used_articles:
+            top_article = article
+            break
 
-        top_article = None
+    used_articles.append(top_article[1])
 
-        for article in articles_sorted:
-            if article[1] not in used_articles:
-                top_article = article
-                break
+    if len(used_articles) > 8:
+        used_articles.pop(0)
 
-        used_articles.append(top_article[1])
+    if top_article:
+        data = {
+            'content': f'Top HackerNews article ({top_article[0]} points) -> {top_article[1]}',
+        }
 
-        if len(used_articles) > 5:
-            used_articles.pop(0)
+        headers = {
+            'Content-Type': 'application/json',
+            'Authorization': f'Bot {os.getenv('TOKEN')}'
+        }
 
-        if top_article:
-            data = {
-                'content': f'Top HackerNews article ({top_article[0]} points) -> {top_article[1]}',
-            }
+        url = f"https://discord.com/api/v9/channels/{os.getenv('CSI_CSC_CHANNEL')}/messages"
 
-            headers = {
-                'Content-Type': 'application/json',
-                'Authorization': f'Bot {os.getenv('TOKEN')}'
-            }
+        result = requests.post(url, json=data, headers=headers, timeout=10)
+        result.raise_for_status()
 
-            url = f"https://discord.com/api/v9/channels/{os.getenv('CSI_CSC_CHANNEL')}/messages"
-
-            result = requests.post(url, json=data, headers=headers, timeout=10)
-            result.raise_for_status()
-
-    with open(article_cache_path, 'w+', encoding='utf-8') as file:
-        json_articles = json.dumps(used_articles)
-        file.write(json_articles)
+    
+    s3_client.put_object(Body=json.dumps(used_articles), Bucket=bucket_name, Key=file_key)
 
     return 'success'
