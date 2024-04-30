@@ -1,6 +1,7 @@
 import requests
 from html.parser import HTMLParser
 import os
+import json
 
 
 class HNHTMLParser(HTMLParser):
@@ -39,6 +40,7 @@ class HNHTMLParser(HTMLParser):
 
 
 def lambda_handler(event, context):
+    article_cache_path = 'tmp/article_cache.json' if os.getenv('ENV') == "DEV" else '/tmp/article_cache.json'
     response = requests.get("https://news.ycombinator.com/", timeout=10)
     html = response.text
 
@@ -50,21 +52,44 @@ def lambda_handler(event, context):
     parser.feed(html)
 
     articles_sorted = sorted(parser.articles, key=lambda x: x[0], reverse=True)
-    top_article = articles_sorted[0] if articles_sorted else None
 
-    if top_article:
-        data = {
-            'content': f'Top HackerNews article ({top_article[0]} points) -> {top_article[1]}',
-        }
+    if not os.path.isfile(article_cache_path):
+        with open(article_cache_path, 'w', encoding='utf-8') as file:
+            file.write('[]')
 
-        headers = {
-            'Content-Type': 'application/json',
-            'Authorization': f'Bot {os.getenv('TOKEN')}'
-        }
 
-        url = f"https://discord.com/api/v9/channels/{os.getenv('CSI_CSC_CHANNEL')}/messages"
+    with open(article_cache_path, 'r', encoding='utf-8') as file:
+        used_articles = json.loads(file.read())
 
-        result = requests.post(url, json=data, headers=headers, timeout=10)
-        result.raise_for_status()
+        top_article = None
+
+        for article in articles_sorted:
+            if article[1] not in used_articles:
+                top_article = article
+                break
+
+        used_articles.append(top_article[1])
+
+        if len(used_articles) > 5:
+            used_articles.pop(0)
+
+        if top_article:
+            data = {
+                'content': f'Top HackerNews article ({top_article[0]} points) -> {top_article[1]}',
+            }
+
+            headers = {
+                'Content-Type': 'application/json',
+                'Authorization': f'Bot {os.getenv('TOKEN')}'
+            }
+
+            url = f"https://discord.com/api/v9/channels/{os.getenv('CSI_CSC_CHANNEL')}/messages"
+
+            result = requests.post(url, json=data, headers=headers, timeout=10)
+            result.raise_for_status()
+
+    with open(article_cache_path, 'w+', encoding='utf-8') as file:
+        json_articles = json.dumps(used_articles)
+        file.write(json_articles)
 
     return 'success'
